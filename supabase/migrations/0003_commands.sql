@@ -677,6 +677,7 @@ BEGIN
       ELSE
         v_reason := 'invalid_state';
       END IF;
+      
       EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
           v_error_message = MESSAGE_TEXT;
@@ -687,11 +688,6 @@ BEGIN
         v_status := 'rejected';
         v_reason := 'database_error';
       END;
-
-    EXCEPTION WHEN OTHERS THEN
-      v_status := 'rejected';
-      v_reason := COALESCE(v_reason, 'invalid_state');
-    END;
 
     -- Record command outcome in commands_log
     INSERT INTO commands_log (id, user_id, device_id, type, status, reason)
