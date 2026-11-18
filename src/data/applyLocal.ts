@@ -504,7 +504,9 @@ const block = await db.getFirstAsync<{
         if (!pkg) throw new Error('unknown_label');
         if (pkg.status === 'arrived' || pkg.status === 'delivered') throw new Error('already_received');
         if (pkg.status !== 'loaded') throw new Error('invalid_state');
-        if (pkg.t_status !== 'arrived') throw new Error('trip_not_arrived');
+        if (pkg.t_status !== 'in_transit' && pkg.t_status !== 'arrived') {
+          throw new Error('trip_not_arrived');
+        }
         if (user.locationId && user.locationId !== pkg.s_dest) throw new Error('wrong_branch');
         if (!['ok', 'damaged', 'opened'].includes(p.condition)) throw new Error('invalid_state');
         if (p.condition !== 'ok' && !p.arrival_photo_path) throw new Error('missing_photo');
@@ -522,7 +524,20 @@ const block = await db.getFirstAsync<{
             pkg.id,
           ]
         );
-
+                // first package received at the destination marks the whole trip as arrived
+        if (pkg.t_status === 'in_transit' && pkg.current_trip_id) {
+          await db.runAsync(
+            `UPDATE trips SET status = 'arrived', arrived_at = ?, updated_at = ? WHERE id = ?`,
+            [recordedAt, recordedAt, pkg.current_trip_id]
+          );
+          await db.runAsync(
+            `UPDATE shipments SET status = 'arrived', updated_at = ?
+             WHERE status = 'in_transit' AND id IN (
+               SELECT shipment_id FROM packages WHERE current_trip_id = ?
+             )`,
+            [recordedAt, pkg.current_trip_id]
+          );
+        }
         await db.runAsync(
           `INSERT INTO custody_events (
             shipment_id, package_id, type, actor_id, trip_id, lat, lng, note, photo_path, recorded_at, created_at, sv

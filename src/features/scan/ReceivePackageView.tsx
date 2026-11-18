@@ -1,5 +1,4 @@
-
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView } from 'expo-camera';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal, Pressable, View } from 'react-native';
 import { Button, HelperText, Text, useTheme } from 'react-native-paper';
@@ -7,16 +6,14 @@ import { getDb } from '../../data/db';
 import { getScanGps } from '../../data/location';
 import { saveAndQueueMedia } from '../../data/media';
 import { enqueueCommand } from '../../data/outbox';
-import { logError } from "../../data/sync";
+import { logError } from '../../data/sync';
 import { copy } from '../../lib/copy';
 import { useAuthStore } from '../../store/authStore';
 import { radius, size, space, type } from '../../tokens';
-import { AppBar } from '../../ui/AppBar';
-import { EmptyState } from '../../ui/EmptyState';
 import { FormField } from '../../ui/FormField';
 import { PhotoPicker } from '../../ui/PhotoPicker';
 import { PrimaryButton } from '../../ui/PrimaryButton';
-import { Screen } from '../../ui/Screen';
+
 type Condition = 'ok' | 'damaged' | 'opened';
 
 interface ScannedPackage {
@@ -99,10 +96,11 @@ async function fetchProgress(shipmentId: string): Promise<PackageProgress | null
   );
 }
 
-export function ReceivePackageView() {
+// The parent screen (ScanHubView) provides the Screen wrapper, app bar and
+// camera permission, so this component returns a fragment only.
+export function ReceivePanel() {
   const { colors } = useTheme();
   const user = useAuthStore((s) => s.user);
-  const [permission, requestPermission] = useCameraPermissions();
 
   const [scanned, setScanned] = useState<ScannedPackage | null>(null);
   const [manualCode, setManualCode] = useState('');
@@ -244,36 +242,12 @@ export function ReceivePackageView() {
       }
     } catch (err: unknown) {
       console.error('[receive-package] Receipt command failed:', err);
-      logError('[receive-package] Receipt command failed:', err)
+      logError('[receive-package] Receipt command failed:', err);
       setError(getErrorMessage(err));
     } finally {
       submitLock.current = false;
       setIsSubmitting(false);
     }
-  }
-
-  if (!permission?.granted) {
-    return (
-      <Screen>
-        <AppBar title={copy.receive.title} />
-
-        <EmptyState
-          icon="camera-off"
-          title="Camera permission needed"
-          message="Camera access is required to receive package QR codes."
-        />
-
-        {!!permission && !permission.granted && (
-          <HelperText type="error" visible>
-            Camera permission has not been granted.
-          </HelperText>
-        )}
-
-        <PrimaryButton onPress={requestPermission}>
-          Grant Permission
-        </PrimaryButton>
-      </Screen>
-    );
   }
 
   const conditionLabels: Record<Condition, string> = {
@@ -283,9 +257,7 @@ export function ReceivePackageView() {
   };
 
   return (
-    <Screen>
-      <AppBar title={copy.receive.title} />
-
+    <>
       {progress && (
         <View
           style={{
@@ -468,6 +440,6 @@ export function ReceivePackageView() {
           </View>
         </View>
       </Modal>
-    </Screen>
+    </>
   );
 }

@@ -1,6 +1,6 @@
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system';
-import React, { useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { GestureResponderEvent, View } from 'react-native';
 import { Button, Text, useTheme } from 'react-native-paper';
 import Svg, { Path } from 'react-native-svg';
@@ -112,3 +112,4 @@ export function SignaturePad({ onSignatureChange }: SignaturePadProps) {
     </View>
   );
 }
+

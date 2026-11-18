@@ -1,9 +1,9 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Crypto from 'expo-crypto';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { Pressable, View } from 'react-native';
-import { HelperText, SegmentedButtons, Switch, Text, useTheme } from 'react-native-paper';
+import { useEffect, useState } from 'react';
+import { Image, Pressable, View } from 'react-native';
+import { Button, HelperText, SegmentedButtons, Switch, Text, useTheme } from 'react-native-paper';
 import { getDb } from '../../data/db';
 import { getScanGps } from '../../data/location';
 import { saveAndQueueMedia } from '../../data/media';
@@ -18,11 +18,51 @@ import { FormField } from '../../ui/FormField';
 import { PhotoPicker } from '../../ui/PhotoPicker';
 import { PrimaryButton } from '../../ui/PrimaryButton';
 import { Screen } from '../../ui/Screen';
-import { SignaturePad } from '../../ui/SignaturePad';
+import { SignatureSheet } from '../../ui/SignatureSheet';
 
 interface CollectionViewProps {
   shipmentId: string;
 }
+
+type CodeState = 'idle' | 'match' | 'wrong' | 'unavailable';
+
+/* ---------- Small helpers ---------- */
+
+function SwitchRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const { colors } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: space.xs,
+      }}
+    >
+      <Text style={[type.label, { color: colors.onSurface, flex: 1 }]}>{label}</Text>
+      <Switch value={value} onValueChange={onChange} color={colors.primary} />
+    </View>
+  );
+}
+
+function SectionTitle({ children }: { children: string }) {
+  const { colors } = useTheme();
+  return (
+    <Text style={[type.label, { color: colors.onSurfaceVariant, marginTop: space.sm }]}>
+      {children}
+    </Text>
+  );
+}
+
+/* ---------- Screen ---------- */
 
 export function CollectionView({ shipmentId }: CollectionViewProps) {
   const router = useRouter();
@@ -31,7 +71,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
 
   const [verifiedBy, setVerifiedBy] = useState<'code' | 'call'>('code');
   const [pickupCode, setPickupCode] = useState('');
-  const [codeStatus, setCodeStatus] = useState<string | null>(null);
+  const [codeState, setCodeState] = useState<CodeState>('idle');
 
   const [collectorIsReceiver, setCollectorIsReceiver] = useState(true);
   const [collectorName, setCollectorName] = useState('');
@@ -42,6 +82,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
 
   const [handoverPhotos, setHandoverPhotos] = useState<string[]>([]);
   const [signatureUri, setSignatureUri] = useState<string | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   const [receiverName, setReceiverName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -49,42 +90,51 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
   const [isDelivered, setIsDelivered] = useState(false);
   const [deliveredTimestamp, setDeliveredTimestamp] = useState('');
 
+  const codeMessage: Record<CodeState, string | null> = {
+    idle: null,
+    match: copy.collection.codeMatches,
+    wrong: copy.collection.wrongCode,
+    unavailable: copy.collection.codeNotAvailable,
+  };
+
+  /* Load receiver */
   useEffect(() => {
-    async function loadShipment() {
+    let cancelled = false;
+    (async () => {
       const db = await getDb();
       const s = await db.getFirstAsync<{ receiver_name: string }>(
         'SELECT receiver_name FROM shipments WHERE id = ?',
         [shipmentId]
       );
-      if (s) {
+      if (s && !cancelled) {
         setReceiverName(s.receiver_name);
         setCollectorName(s.receiver_name);
       }
-    }
-    loadShipment();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [shipmentId]);
 
-  // Code verification against local pickup_codes table
+  /* Verify pickup code against local hash.
+     The cancelled flag stops a slow earlier check overwriting a newer result. */
   useEffect(() => {
-    if (verifiedBy !== 'code') {
-      setCodeStatus(null);
+    if (verifiedBy !== 'code' || pickupCode.length < 6) {
+      setCodeState('idle');
       return;
     }
 
-    if (pickupCode.length < 6) {
-      setCodeStatus(null);
-      return;
-    }
-
-    async function verify() {
+    let cancelled = false;
+    (async () => {
       const db = await getDb();
       const pc = await db.getFirstAsync<{ salt: string; code_hash: string }>(
         'SELECT salt, code_hash FROM pickup_codes WHERE shipment_id = ?',
         [shipmentId]
       );
+      if (cancelled) return;
 
       if (!pc) {
-        setCodeStatus(copy.collection.codeNotAvailable);
+        setCodeState('unavailable');
         return;
       }
 
@@ -92,23 +142,23 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
         Crypto.CryptoDigestAlgorithm.SHA256,
         pc.salt + pickupCode
       );
+      if (cancelled) return;
 
-      if (computed.toLowerCase() === pc.code_hash.toLowerCase()) {
-        setCodeStatus(copy.collection.codeMatches);
-      } else {
-        setCodeStatus(copy.collection.wrongCode);
-      }
-    }
+      setCodeState(computed.toLowerCase() === pc.code_hash.toLowerCase() ? 'match' : 'wrong');
+    })();
 
-    verify();
+    return () => {
+      cancelled = true;
+    };
   }, [pickupCode, verifiedBy, shipmentId]);
 
   async function handleConfirmCollection() {
+    if (isSubmitting) return;
     setError(null);
     if (!user) return;
 
     if (verifiedBy === 'code') {
-      if (codeStatus !== copy.collection.codeMatches) {
+      if (codeState !== 'match') {
         setError(copy.reasons.bad_code);
         return;
       }
@@ -125,11 +175,14 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
     }
 
     const finalCollectorName = collectorIsReceiver ? receiverName : collectorName.trim();
-    if (!collectorIsReceiver) {
-      if (!finalCollectorName || !relationship.trim()) {
-        setError('Collector name and relationship are required.');
-        return;
-      }
+    if (!collectorIsReceiver && (!finalCollectorName || !relationship.trim())) {
+      setError('Collector name and relationship are required.');
+      return;
+    }
+
+    if (idChecked && !idType) {
+      setError('Select the type of ID that was checked.');
+      return;
     }
 
     if (handoverPhotos.length === 0 || !signatureUri) {
@@ -138,7 +191,6 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
     }
 
     setIsSubmitting(true);
-
     try {
       const photoPath = await saveAndQueueMedia(handoverPhotos[0], user.id);
       const sigPath = await saveAndQueueMedia(signatureUri, user.id, 'png');
@@ -160,11 +212,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
           lat: gps?.lat ?? null,
           lng: gps?.lng ?? null,
         },
-        {
-          userId: user.id,
-          role: user.role,
-          locationId: user.location_id,
-        }
+        { userId: user.id, role: user.role, locationId: user.location_id }
       );
 
       setDeliveredTimestamp(formatDateTime(new Date().toISOString()));
@@ -177,7 +225,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
     }
   }
 
-  // Success Screen
+  /* ---------- Success ---------- */
   if (isDelivered) {
     return (
       <Screen>
@@ -209,11 +257,13 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
     );
   }
 
+  /* ---------- Form ---------- */
   return (
     <Screen>
       <AppBar title={copy.collection.title} />
 
-      {/* Segmented Verification */}
+      {/* 1. Verification */}
+      <SectionTitle>Verification</SectionTitle>
       <SegmentedButtons
         value={verifiedBy}
         onValueChange={(val) => setVerifiedBy(val as 'code' | 'call')}
@@ -223,51 +273,42 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
         ]}
       />
 
-      {verifiedBy === 'code' ? (
+      {verifiedBy === 'code' && (
         <View style={{ gap: space.xs }}>
           <FormField
             label={copy.collection.codeField}
             value={pickupCode}
-            onChangeText={setPickupCode}
+            onChangeText={(t: string) => setPickupCode(t.replace(/\D/g, ''))}
             keyboardType="number-pad"
             maxLength={6}
           />
-          {!!codeStatus && (
-            <Text
-              style={[
-                type.caption,
-                {
-                  color:
-                    codeStatus === copy.collection.codeMatches
-                      ? statusColors.delivered
-                      : colors.error,
-                },
-              ]}
-            >
-              {codeStatus}
-            </Text>
+          {!!codeMessage[codeState] && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs }}>
+              <MaterialCommunityIcons
+                name={codeState === 'match' ? 'check-circle' : 'alert-circle'}
+                size={16}
+                color={codeState === 'match' ? statusColors.delivered : colors.error}
+              />
+              <Text
+                style={[
+                  type.caption,
+                  { color: codeState === 'match' ? statusColors.delivered : colors.error },
+                ]}
+              >
+                {codeMessage[codeState]}
+              </Text>
+            </View>
           )}
         </View>
-      ) : null}
+      )}
 
-      {/* Switch: Collector is the receiver */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingVertical: space.xs,
-        }}
-      >
-        <Text style={[type.label, { color: colors.onSurface }]}>
-          {copy.collection.collectorIsReceiver}
-        </Text>
-        <Switch
-          value={collectorIsReceiver}
-          onValueChange={setCollectorIsReceiver}
-          color={colors.primary}
-        />
-      </View>
+      {/* 2. Collector */}
+      <SectionTitle>Collector</SectionTitle>
+      <SwitchRow
+        label={copy.collection.collectorIsReceiver}
+        value={collectorIsReceiver}
+        onChange={setCollectorIsReceiver}
+      />
 
       {!collectorIsReceiver && (
         <View style={{ gap: space.sm }}>
@@ -284,24 +325,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
         </View>
       )}
 
-      {/* Switch: ID checked */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingVertical: space.xs,
-        }}
-      >
-        <Text style={[type.label, { color: colors.onSurface }]}>
-          {copy.collection.idChecked}
-        </Text>
-        <Switch
-          value={idChecked}
-          onValueChange={setIdChecked}
-          color={colors.primary}
-        />
-      </View>
+      <SwitchRow label={copy.collection.idChecked} value={idChecked} onChange={setIdChecked} />
 
       {idChecked && (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs }}>
@@ -311,7 +335,7 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
               <Pressable
                 key={item.id}
                 onPress={() => setIdType(item.id)}
-                style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
               >
                 <View
                   style={{
@@ -338,7 +362,8 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
         </View>
       )}
 
-      {/* Handover Photo */}
+      {/* 3. Proof of handover */}
+      <SectionTitle>Proof of handover</SectionTitle>
       <PhotoPicker
         label={copy.collection.photoLabel}
         photos={handoverPhotos}
@@ -346,8 +371,45 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
         max={1}
       />
 
-      {/* Signature Pad */}
-      <SignaturePad onSignatureChange={setSignatureUri} />
+      {/* Signature: tap to open the sheet, preview once captured */}
+      {signatureUri ? (
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: colors.outline,
+            borderRadius: 12,
+            padding: space.sm,
+            gap: space.xs,
+            backgroundColor: '#fff',
+          }}
+        >
+          <Image
+            source={{ uri: signatureUri }}
+            style={{ width: '100%', height: 100 }}
+            resizeMode="contain"
+          />
+          <Button mode="text" icon="pencil" onPress={() => setSheetOpen(true)}>
+            Sign again
+          </Button>
+        </View>
+      ) : (
+        <Pressable
+          onPress={() => setSheetOpen(true)}
+          style={({ pressed }) => ({
+            opacity: pressed ? 0.7 : 1,
+            borderWidth: 1,
+            borderStyle: 'dashed',
+            borderColor: colors.outline,
+            borderRadius: 12,
+            paddingVertical: space.lg ?? space.md,
+            alignItems: 'center',
+            gap: space.xs,
+          })}
+        >
+          <MaterialCommunityIcons name="draw" size={28} color={colors.primary} />
+          <Text style={[type.label, { color: colors.primary }]}>Tap to sign</Text>
+        </Pressable>
+      )}
 
       {!!error && (
         <HelperText type="error" visible style={{ paddingHorizontal: 0 }}>
@@ -362,6 +424,17 @@ export function CollectionView({ shipmentId }: CollectionViewProps) {
       >
         {copy.collection.confirmButton}
       </PrimaryButton>
+
+      <SignatureSheet
+        visible={sheetOpen}
+        title="Receiver signature"
+        onClose={() => setSheetOpen(false)}
+        onSave={(uri) => {
+          setSignatureUri(uri);
+          setSheetOpen(false);
+          setError(null);
+        }}
+      />
     </Screen>
   );
 }

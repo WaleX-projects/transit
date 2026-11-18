@@ -203,13 +203,13 @@ BEGIN
 
           IF v_origin_id = v_destination_id THEN
             v_reason := 'invalid_state';
-          ELSIF EXISTS (
+          ELSIF NULLIF(v_cmd->>'driver_id', '') IS NOT NULL AND EXISTS (
             SELECT 1 FROM trips
             WHERE driver_id = (v_cmd->>'driver_id')::uuid
               AND status IN ('loading', 'in_transit')
           ) THEN
             v_reason := 'driver_busy';
-          ELSIF EXISTS (
+          ELSIF NULLIF(v_cmd->>'vehicle_id', '') IS NOT NULL AND EXISTS (
             SELECT 1 FROM trips
             WHERE vehicle_id = (v_cmd->>'vehicle_id')::uuid
               AND status IN ('loading', 'in_transit')
@@ -220,8 +220,8 @@ BEGIN
               id, vehicle_id, driver_id, origin_id, destination_id, status, created_by
             ) VALUES (
               v_trip_id,
-              (v_cmd->>'vehicle_id')::uuid,
-              (v_cmd->>'driver_id')::uuid,
+              NULLIF(v_cmd->>'vehicle_id', '')::uuid,
+              NULLIF(v_cmd->>'driver_id', '')::uuid,
               v_origin_id,
               v_destination_id,
               'loading',
@@ -230,10 +230,9 @@ BEGIN
             v_status := 'applied';
           END IF;
         END IF;
-
       -- Command 3: load_scan
       ELSIF v_cmd_type = 'load_scan' THEN
-        IF v_role <> 'driver' THEN
+        IF v_role NOT IN ('manager', 'driver') THEN
           v_reason := 'not_allowed';
         ELSE
           v_trip_id := (v_cmd->>'trip_id')::uuid;
@@ -241,7 +240,9 @@ BEGIN
 
           -- 1. own trip with status 'loading'
           SELECT * INTO v_trip_record FROM trips WHERE id = v_trip_id;
-          IF NOT FOUND OR v_trip_record.driver_id <> v_caller_id OR v_trip_record.status <> 'loading' THEN
+          IF NOT FOUND
+            OR v_trip_record.status <> 'loading'
+            OR (v_role = 'driver' AND v_trip_record.driver_id IS DISTINCT FROM v_caller_id) THEN
             v_reason := 'not_your_trip';
           ELSE
             -- 2. label exists
@@ -314,13 +315,13 @@ BEGIN
 
       -- Command 5: start_trip
       ELSIF v_cmd_type = 'start_trip' THEN
-        IF v_role <> 'driver' THEN
+        IF v_role NOT IN ('manager', 'driver') THEN
           v_reason := 'not_allowed';
         ELSE
           v_trip_id := (v_cmd->>'trip_id')::uuid;
           SELECT * INTO v_trip_record FROM trips WHERE id = v_trip_id;
 
-          IF NOT FOUND OR v_trip_record.driver_id <> v_caller_id THEN
+          IF NOT FOUND OR (v_role = 'driver' AND v_trip_record.driver_id IS DISTINCT FROM v_caller_id) THEN
             v_reason := 'not_your_trip';
           ELSIF v_trip_record.status <> 'loading' THEN
             v_reason := 'invalid_state';
@@ -407,7 +408,7 @@ BEGIN
           v_trip_id := (v_cmd->>'trip_id')::uuid;
           SELECT * INTO v_trip_record FROM trips WHERE id = v_trip_id;
 
-          IF NOT FOUND OR v_trip_record.driver_id <> v_caller_id THEN
+          IF NOT FOUND OR v_trip_record.driver_id IS DISTINCT FROM v_caller_id THEN
             v_reason := 'not_your_trip';
           ELSIF v_trip_record.status <> 'in_transit' THEN
             v_reason := 'invalid_state';
@@ -450,7 +451,7 @@ BEGIN
           ELSIF v_pkg_record.status <> 'loaded' THEN
             v_reason := 'invalid_state';
           -- 3. its trip 'arrived'
-          ELSIF v_pkg_record.t_status <> 'arrived' THEN
+          ELSIF v_pkg_record.t_status NOT IN ('in_transit', 'arrived') THEN
             v_reason := 'trip_not_arrived';
           -- 4. my_location() = shipment.destination_id
           ELSIF v_caller_location IS NULL OR v_caller_location <> v_pkg_record.s_dest THEN
@@ -472,6 +473,17 @@ BEGIN
                 arrival_note = v_cmd->>'note',
                 arrived_at = v_recorded_at
             WHERE id = v_pkg_record.id;
+                        -- first package received at the destination marks the whole trip as arrived
+            IF v_pkg_record.t_status = 'in_transit' THEN
+              UPDATE trips
+              SET status = 'arrived', arrived_at = v_recorded_at
+              WHERE id = v_pkg_record.current_trip_id;
+
+              UPDATE shipments
+              SET status = 'arrived'
+              WHERE status = 'in_transit'
+                AND id IN (SELECT shipment_id FROM packages WHERE current_trip_id = v_pkg_record.current_trip_id);
+            END IF;
 
             INSERT INTO custody_events (
               shipment_id, package_id, type, actor_id, trip_id, lat, lng, note, photo_path, recorded_at

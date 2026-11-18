@@ -43,10 +43,10 @@ export default function RootLayout() {
 
     const isAuthRoute =
       currentRoute === 'login' ||
-      currentRoute === 'signup';
+      currentRoute === 'signup' || currentRoute === 'passwordforget';
 
     const isIndexRoute =
-      !currentRoute || currentRoute === 'index';
+      !currentRoute || currentRoute === '/index';
 
     if (!user && !isAuthRoute) {
       router.replace('/login');
@@ -76,6 +76,7 @@ export default function RootLayout() {
           <Stack.Screen name="index" />
           <Stack.Screen name="login" />
           <Stack.Screen name="signup" />
+          <Stack.Screen name="passwordforget" />
           <Stack.Screen name="shipment/new" />
           <Stack.Screen name="shipment/[id]/index" />
           <Stack.Screen name="shipment/[id]/labels" />

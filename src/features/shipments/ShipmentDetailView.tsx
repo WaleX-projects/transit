@@ -1,13 +1,16 @@
+import NetInfo from '@react-native-community/netinfo';
 import * as Crypto from 'expo-crypto';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Image, Linking, Modal, Pressable, View } from 'react-native';
+import { useCallback, useState } from 'react';
+import { Image, Linking, Modal, View } from 'react-native';
 import { Button, Dialog, Portal, Text, TextInput, useTheme } from 'react-native-paper';
 import { getDb } from '../../data/db';
+import { getDeviceId } from '../../data/device';
 import { resolveImageUri } from '../../data/media';
 import { enqueueCommand } from '../../data/outbox';
 import { copy } from '../../lib/copy';
 import { formatDateTime } from '../../lib/format';
+import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/authStore';
 import { statusColors } from '../../theme';
 import { radius, size, space, type } from '../../tokens';
@@ -17,7 +20,6 @@ import { PrimaryButton } from '../../ui/PrimaryButton';
 import { Screen } from '../../ui/Screen';
 import { StatusChip } from '../../ui/StatusChip';
 import { StepTracker } from '../../ui/StepTracker';
-
 interface ShipmentDetailData {
   id: string;
   waybill_no: string;
@@ -94,6 +96,68 @@ export function ShipmentDetailView({ shipmentId }: Props) {
   const [contacts, setContacts] = useState<ContactAttemptItem[]>([]);
   const [collection, setCollection] = useState<CollectionProof | null>(null);
 
+  const [startingLoad, setStartingLoad] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  async function handleStartLoading() {
+    if (!shipment || startingLoad) return;
+    setStartingLoad(true);
+    setStartError(null);
+
+    try {
+      const net = await NetInfo.fetch();
+      if (net.isConnected !== true) throw new Error('Internet connection required to start loading.');
+
+      const { data: open, error } = await supabase
+        .from('trips')
+        .select('id')
+        .eq('origin_id', shipment.origin_id)
+        .eq('destination_id', shipment.destination_id)
+        .eq('status', 'loading');
+      if (error) throw error;
+
+      let tripId: string | undefined = open?.length === 1 ? open[0].id : undefined;
+
+      if (!open || open.length === 0) {
+        const newTripId = Crypto.randomUUID();
+        const commandId = Crypto.randomUUID();
+
+        const { data, error: rpcError } = await supabase.rpc('apply_commands', {
+          p_device_id: await getDeviceId(),
+          p_commands: [
+            {
+              id: commandId,
+              type: 'create_trip',
+              trip_id: newTripId,
+              origin_id: shipment.origin_id,
+              destination_id: shipment.destination_id,
+              driver_id: null,
+              vehicle_id: null,
+              recorded_at: new Date().toISOString(),
+            },
+          ],
+        });
+        if (rpcError) throw rpcError;
+
+        const result = Array.isArray(data)
+          ? data.find((r: { id: string }) => r.id === commandId)
+          : null;
+        if (!result || result.status !== 'applied') {
+          throw new Error(result?.reason ?? 'Could not create trip.');
+        }
+        tripId = newTripId;
+      }
+
+      router.push({
+        pathname: '/scan',
+        params: { mode: 'load', ...(tripId ? { tripId } : {}) },
+      });
+    } catch (e) {
+      setStartError(e instanceof Error ? e.message : 'Could not start loading.');
+    } finally {
+      setStartingLoad(false);
+    }
+  }
   // Compare photos modal
   const [compareModalVisible, setCompareModalVisible] = useState(false);
   const [comparePhotos, setComparePhotos] = useState<{ originUri: string | null; arrivalUri: string | null }>({
@@ -201,6 +265,7 @@ export function ShipmentDetailView({ shipmentId }: Props) {
   const hasArrivalPhoto = packages.some((p) => !!p.arrival_photo_path);
   const isReady = shipment.ready_at !== null && shipment.status !== 'delivered';
   const isManagerAtDestination = user?.role === 'manager' && user.location_id === shipment.destination_id;
+  const canStartLoading = shipment.status === 'registered';
 
   async function openComparePhotos() {
     const pkgWithArrival = packages.find((p) => !!p.arrival_photo_path);
@@ -503,7 +568,20 @@ export function ShipmentDetailView({ shipmentId }: Props) {
       )}
 
       {/* Actions */}
+
+
       <View style={{ gap: space.sm }}>
+
+        {canStartLoading && (
+          <PrimaryButton
+            icon="truck-delivery"
+            onPress={() =>
+              router.push({ pathname: '/scan', params: { mode: 'load' } })
+            }
+          >
+            Start loading
+          </PrimaryButton>
+        )}
         <PrimaryButton
           variant="outline"
           icon="qrcode"

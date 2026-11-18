@@ -21,7 +21,7 @@ export const copy = {
     already_scanned: 'Already scanned.',
     wrong_trip: 'This item is on a different trip.',
     wrong_destination: 'Wrong trip. This item is going to another destination.',
-    trip_not_arrived: 'The trip has not been marked as arrived.',
+    trip_not_arrived: 'This trip has not been dispatched yet.',
     already_received: 'Already received.',
     wrong_branch: 'Wrong branch. This shipment is for another office.',
     bad_code: 'Wrong code.',

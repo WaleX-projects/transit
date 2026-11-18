@@ -1,13 +1,12 @@
-
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView } from 'expo-camera';
 import * as Crypto from 'expo-crypto';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
-import { ProgressBar, Text, useTheme } from 'react-native-paper';
+import { Alert, View } from 'react-native';
+import { Chip, ProgressBar, Text, useTheme } from 'react-native-paper';
 
 import { getDeviceId } from '../../data/device';
 import { getScanGps } from '../../data/location';
@@ -18,14 +17,13 @@ import { statusColors } from '../../theme';
 import { radius, size, space, type } from '../../tokens';
 import { EmptyState } from '../../ui/EmptyState';
 import { PrimaryButton } from '../../ui/PrimaryButton';
-import { Screen } from '../../ui/Screen';
 
 interface ActiveTrip {
   id: string;
   origin_id: string;
   destination_id: string;
   status: string;
-  driver_id: string;
+  driver_id: string | null;
 }
 
 interface UnscannedPackage {
@@ -68,16 +66,20 @@ interface CommandResult {
 const SCAN_COOLDOWN_MS = 1500;
 
 const log = (...args: unknown[]) => {
-  console.log('[driver-scan]', ...args);
+  console.log('[load-panel]', ...args);
 };
 
 const logError = (label: string, error: unknown) => {
-  console.error('[driver-scan]', label, error);
+  console.error('[load-panel]', label, error);
 };
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message);
   }
 
   if (typeof error === 'string') {
@@ -94,29 +96,44 @@ function getReasonMessage(reason: string): string {
 }
 
 // -----------------------------------------------------------------------------
-// FETCH DRIVER'S ACTIVE LOADING TRIP FROM SUPABASE
+// FETCH OPEN LOADING TRIPS
+// Managers see every loading trip. Drivers see only trips assigned to them.
 // -----------------------------------------------------------------------------
 
-async function fetchActiveLoadingTrip(
-  driverId: string
-): Promise<ActiveTrip | null> {
-  const { data, error } = await supabase
+async function fetchLoadingTrips(user: {
+  id: string;
+  role: string;
+}): Promise<ActiveTrip[]> {
+  let query = supabase
     .from('trips')
     .select('id, origin_id, destination_id, status, driver_id')
-    .eq('driver_id', driverId)
-    .eq('status', 'loading')
-    .limit(1)
-    .maybeSingle();
+    .eq('status', 'loading');
+
+  if (user.role === 'driver') {
+    query = query.eq('driver_id', user.id);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     throw error;
   }
 
-  return data as ActiveTrip | null;
+  return (data ?? []) as ActiveTrip[];
+}
+
+async function fetchLocationNames(): Promise<Record<string, string>> {
+  const { data, error } = await supabase.from('locations').select('id, name');
+
+  if (error) {
+    throw error;
+  }
+
+  return Object.fromEntries((data ?? []).map((l) => [l.id, l.name]));
 }
 
 // -----------------------------------------------------------------------------
-// FETCH PACKAGES FOR THE ACTIVE TRIP'S ROUTE
+// FETCH PACKAGES FOR THE TRIP'S ROUTE
 // -----------------------------------------------------------------------------
 
 async function fetchRoutePackages(
@@ -145,10 +162,7 @@ async function fetchRoutePackages(
   }
 
   const waybillByShipment = new Map<string, string>(
-    (shipments ?? []).map((shipment) => [
-      shipment.id,
-      shipment.waybill_no,
-    ])
+    (shipments ?? []).map((shipment) => [shipment.id, shipment.waybill_no])
   );
 
   const { data: rows, error: packageError } = await supabase
@@ -165,9 +179,7 @@ async function fetchRoutePackages(
   const allPackages = rows ?? [];
 
   const loaded = allPackages.filter(
-    (pkg) =>
-      pkg.status === 'loaded' &&
-      pkg.current_trip_id === trip.id
+    (pkg) => pkg.status === 'loaded' && pkg.current_trip_id === trip.id
   ).length;
 
   const packages: UnscannedPackage[] = allPackages
@@ -183,9 +195,7 @@ async function fetchRoutePackages(
     .sort((a, b) => {
       const waybillComparison = a.waybill_no.localeCompare(b.waybill_no);
 
-      return waybillComparison !== 0
-        ? waybillComparison
-        : a.seq - b.seq;
+      return waybillComparison !== 0 ? waybillComparison : a.seq - b.seq;
     });
 
   return {
@@ -198,17 +208,13 @@ async function fetchRoutePackages(
 }
 
 // -----------------------------------------------------------------------------
-// LOOK UP SCANNED PACKAGE DIRECTLY FROM SUPABASE
+// LOOK UP A SCANNED PACKAGE
 // -----------------------------------------------------------------------------
 
-async function lookupPackage(
-  labelCode: string
-): Promise<ScannedInfo | null> {
+async function lookupPackage(labelCode: string): Promise<ScannedInfo | null> {
   const { data: pkg, error: packageError } = await supabase
     .from('packages')
-    .select(
-      'id, label_code, shipment_id, seq, status, current_trip_id'
-    )
+    .select('id, label_code, shipment_id, seq, status, current_trip_id')
     .eq('label_code', labelCode)
     .maybeSingle();
 
@@ -248,12 +254,11 @@ async function lookupPackage(
 }
 
 // -----------------------------------------------------------------------------
-// SUBMIT LOAD SCAN DIRECTLY TO SUPABASE
+// SEND A COMMAND TO SUPABASE
 // -----------------------------------------------------------------------------
 
-async function submitLoadScan(
-  tripId: string,
-  labelCode: string
+async function sendCommand(
+  command: Record<string, unknown>
 ): Promise<CommandResult> {
   const network = await NetInfo.fetch();
 
@@ -262,27 +267,14 @@ async function submitLoadScan(
   }
 
   const deviceId = await getDeviceId();
-
-  let gps: Awaited<ReturnType<typeof getScanGps>> = null;
-
-  try {
-    gps = await getScanGps();
-  } catch (error) {
-    logError('GPS unavailable; continuing without coordinates', error);
-  }
-
   const commandId = Crypto.randomUUID();
 
   const { data, error } = await supabase.rpc('apply_commands', {
     p_device_id: deviceId,
     p_commands: [
       {
+        ...command,
         id: commandId,
-        type: 'load_scan',
-        trip_id: tripId,
-        label_code: labelCode,
-        lat: gps?.lat ?? null,
-        lng: gps?.lng ?? null,
         recorded_at: new Date().toISOString(),
       },
     ],
@@ -296,9 +288,9 @@ async function submitLoadScan(
     throw new Error('missing_response');
   }
 
-  const result = data.find(
-    (item: CommandResult) => item.id === commandId
-  ) as CommandResult | undefined;
+  const result = data.find((item: CommandResult) => item.id === commandId) as
+    | CommandResult
+    | undefined;
 
   if (!result) {
     throw new Error('missing_response');
@@ -311,83 +303,128 @@ async function submitLoadScan(
   return result;
 }
 
+async function submitLoadScan(
+  tripId: string,
+  labelCode: string
+): Promise<CommandResult> {
+  let gps: Awaited<ReturnType<typeof getScanGps>> = null;
+
+  try {
+    gps = await getScanGps();
+  } catch (error) {
+    logError('GPS unavailable; continuing without coordinates', error);
+  }
+
+  return sendCommand({
+    type: 'load_scan',
+    trip_id: tripId,
+    label_code: labelCode,
+    lat: gps?.lat ?? null,
+    lng: gps?.lng ?? null,
+  });
+}
+
+async function dispatchTrip(tripId: string): Promise<CommandResult> {
+  return sendCommand({ type: 'start_trip', trip_id: tripId });
+}
+
 // -----------------------------------------------------------------------------
-// DRIVER SCAN SCREEN
+// LOAD PANEL
+// The parent screen (ScanHubView) provides the Screen wrapper, app bar and
+// camera permission, so this component returns fragments only.
 // -----------------------------------------------------------------------------
 
-export function DriverScanView() {
+export function LoadPanel({ initialTripId }: { initialTripId?: string }) {
   const { colors } = useTheme();
   const user = useAuthStore((state) => state.user);
-  const [permission, requestPermission] = useCameraPermissions();
 
+  const [trips, setTrips] = useState<ActiveTrip[]>([]);
   const [trip, setTrip] = useState<ActiveTrip | null>(null);
+  const [locationNames, setLocationNames] = useState<Record<string, string>>(
+    {}
+  );
   const [loadedCount, setLoadedCount] = useState(0);
   const [expectedCount, setExpectedCount] = useState(0);
   const [unscanned, setUnscanned] = useState<UnscannedPackage[]>([]);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [isLoadingTrip, setIsLoadingTrip] = useState(true);
+  const [isDispatching, setIsDispatching] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const scanLock = useRef(false);
   const cooldownTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const tripId = trip?.id ?? null;
+  const tripRef = useRef<ActiveTrip | null>(null);
 
   // ---------------------------------------------------------------------------
-  // LOAD CURRENT TRIP AND PACKAGE DATA
+  // LOAD OPEN TRIPS AND PACKAGE DATA
   // ---------------------------------------------------------------------------
 
-  const loadTripData = useCallback(async () => {
-    if (!user) {
-      setTrip(null);
-      setLoadedCount(0);
-      setExpectedCount(0);
-      setUnscanned([]);
-      setIsLoadingTrip(false);
-      return;
-    }
-
-    setIsLoadingTrip(true);
-    setLoadError(null);
-
-    try {
-      log('Fetching active loading trip from Supabase', user.id);
-
-      const activeTrip = await fetchActiveLoadingTrip(user.id);
-
-      if (!activeTrip) {
+  const loadTripData = useCallback(
+    async (preferredId?: string) => {
+      if (!user) {
+        setTrips([]);
         setTrip(null);
+        tripRef.current = null;
         setLoadedCount(0);
         setExpectedCount(0);
         setUnscanned([]);
+        setIsLoadingTrip(false);
         return;
       }
 
-      const result = await fetchRoutePackages(activeTrip);
+      setIsLoadingTrip(true);
+      setLoadError(null);
 
-      setTrip(activeTrip);
-      setLoadedCount(result.progress.loaded);
-      setExpectedCount(result.progress.expected);
-      setUnscanned(result.packages);
+      try {
+        const [open, names] = await Promise.all([
+          fetchLoadingTrips(user),
+          fetchLocationNames().catch(() => ({}) as Record<string, string>),
+        ]);
 
-      log('Trip data loaded from Supabase', {
-        tripId: activeTrip.id,
-        loaded: result.progress.loaded,
-        expected: result.progress.expected,
-        unscanned: result.packages.length,
-      });
-    } catch (error) {
-      logError('Could not load trip data', error);
-      setLoadError(getErrorMessage(error));
-    } finally {
-      setIsLoadingTrip(false);
-    }
-  }, [user]);
+        setTrips(open);
+        setLocationNames(names);
+
+        const wanted = preferredId ?? tripRef.current?.id;
+        const active = open.find((t) => t.id === wanted) ?? open[0] ?? null;
+
+        if (!active) {
+          setTrip(null);
+          tripRef.current = null;
+          setLoadedCount(0);
+          setExpectedCount(0);
+          setUnscanned([]);
+          return;
+        }
+
+        const result = await fetchRoutePackages(active);
+
+        setTrip(active);
+        tripRef.current = active;
+        setLoadedCount(result.progress.loaded);
+        setExpectedCount(result.progress.expected);
+        setUnscanned(result.packages);
+
+        log('Trip data loaded', {
+          tripId: active.id,
+          loaded: result.progress.loaded,
+          expected: result.progress.expected,
+          unscanned: result.packages.length,
+        });
+      } catch (error) {
+        logError('Could not load trip data', error);
+        setLoadError(getErrorMessage(error));
+      } finally {
+        setIsLoadingTrip(false);
+      }
+    },
+    [user]
+  );
 
   useFocusEffect(
     useCallback(() => {
-      void loadTripData();
-    }, [loadTripData])
+      void loadTripData(initialTripId);
+    }, [loadTripData, initialTripId])
   );
 
   useEffect(() => {
@@ -418,12 +455,13 @@ export function DriverScanView() {
   // ---------------------------------------------------------------------------
 
   async function handleBarcodeScanned(raw: string) {
-    if (scanLock.current || !trip || !user) {
+    if (scanLock.current || !trip || !user || isDispatching) {
       return;
     }
 
     scanLock.current = true;
     setScanResult(null);
+    setNotice(null);
 
     const labelCode = raw.trim();
 
@@ -432,16 +470,13 @@ export function DriverScanView() {
         throw new Error('unknown_label');
       }
 
-      log('Looking up package directly in Supabase', labelCode);
-
       const info = await lookupPackage(labelCode);
 
       if (!info) {
         throw new Error('unknown_label');
       }
 
-      // Client-side checks provide quick feedback.
-      // The RPC remains the final authority.
+      // Quick client-side feedback. The server remains the final authority.
       if (info.status === 'loaded') {
         throw new Error('already_scanned');
       }
@@ -457,34 +492,22 @@ export function DriverScanView() {
         throw new Error('wrong_destination');
       }
 
-      if (
-        info.current_trip_id &&
-        info.current_trip_id !== trip.id
-      ) {
+      if (info.current_trip_id && info.current_trip_id !== trip.id) {
         throw new Error('wrong_trip');
       }
-
-      log('Submitting load_scan directly to Supabase', {
-        tripId: trip.id,
-        labelCode,
-      });
 
       const result = await submitLoadScan(trip.id, labelCode);
 
       if (result.status === 'rejected') {
-        log('Supabase rejected scan', result.reason);
-
         throw new Error(result.reason || 'invalid_state');
       }
-
-      log('Supabase applied load_scan', result.id);
 
       try {
         await Haptics.notificationAsync(
           Haptics.NotificationFeedbackType.Success
         );
       } catch {
-        // Haptic failure must not turn a successful scan into a failure.
+        // A haptic failure must not turn a successful scan into a failure.
       }
 
       setScanResult({
@@ -492,7 +515,6 @@ export function DriverScanView() {
         text: `${info.waybill_no} · Package ${info.seq} loaded`,
       });
 
-      // Read the updated server state after a successful scan.
       await loadTripData();
     } catch (error) {
       logError('Scan failed', error);
@@ -515,7 +537,7 @@ export function DriverScanView() {
       } else if (code === 'unknown_label') {
         setScanResult({
           success: false,
-          text: 'Package label was not found in Supabase.',
+          text: 'Package label was not found.',
         });
       } else if (code === 'missing_response') {
         setScanResult({
@@ -539,7 +561,6 @@ export function DriverScanView() {
         });
       }
 
-      // Refresh server data even after a rejected scan.
       try {
         await loadTripData();
       } catch (refreshError) {
@@ -551,24 +572,77 @@ export function DriverScanView() {
   }
 
   // ---------------------------------------------------------------------------
+  // DISPATCH THE TRIP (loading finished, vehicle leaves)
+  // ---------------------------------------------------------------------------
+
+  function confirmDispatch() {
+    if (!trip || isDispatching) {
+      return;
+    }
+
+    const count = loadedCount;
+
+    Alert.alert(
+      'Dispatch trip?',
+      `${count} package(s) loaded. After dispatch, nothing more can be added.` +
+        (unscanned.length > 0
+          ? ' Shipments with packages still unscanned will be flagged as issues.'
+          : ''),
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Dispatch',
+          onPress: async () => {
+            setIsDispatching(true);
+            setScanResult(null);
+
+            try {
+              const result = await dispatchTrip(trip.id);
+
+              if (result.status === 'rejected') {
+                throw new Error(result.reason || 'invalid_state');
+              }
+
+              setNotice(`Trip dispatched with ${count} package(s).`);
+              await loadTripData();
+            } catch (error) {
+              logError('Dispatch failed', error);
+
+              const code = getErrorMessage(error);
+
+              setScanResult({
+                success: false,
+                text:
+                  code === 'offline'
+                    ? 'Internet connection required.'
+                    : getReasonMessage(code),
+              });
+            } finally {
+              setIsDispatching(false);
+            }
+          },
+        },
+      ]
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // LOADING STATES
   // ---------------------------------------------------------------------------
 
   if (isLoadingTrip && !trip) {
     return (
-      <Screen>
-        <EmptyState
-          icon="truck"
-          title="Loading trip"
-          message="Getting your assigned trip and package information from the server."
-        />
-      </Screen>
+      <EmptyState
+        icon="truck"
+        title="Loading trip"
+        message="Getting trip and package information from the server."
+      />
     );
   }
 
   if (loadError && !trip) {
     return (
-      <Screen>
+      <>
         <EmptyState
           icon="alert-circle"
           title="Could not load trip"
@@ -577,42 +651,29 @@ export function DriverScanView() {
         <PrimaryButton onPress={() => void loadTripData()}>
           Try Again
         </PrimaryButton>
-      </Screen>
+      </>
     );
   }
 
   if (!trip) {
     return (
-      <Screen>
+      <>
         <EmptyState
           icon="qrcode-scan"
           title="No open loading trip"
-          message="You can scan packages when you have an assigned trip with status Loading."
+          message={
+            notice ??
+            'Open a shipment that is Received and tap Start loading to begin.'
+          }
         />
         <PrimaryButton onPress={() => void loadTripData()}>
           Refresh
         </PrimaryButton>
-      </Screen>
+      </>
     );
   }
 
-  if (!permission?.granted) {
-    return (
-      <Screen>
-        <EmptyState
-          icon="camera-off"
-          title="Camera permission needed"
-          message="Camera access is required to scan package QR codes."
-        />
-        <PrimaryButton onPress={requestPermission}>
-          Grant Permission
-        </PrimaryButton>
-      </Screen>
-    );
-  }
-
-  const progress =
-    expectedCount > 0 ? loadedCount / expectedCount : 0;
+  const progress = expectedCount > 0 ? loadedCount / expectedCount : 0;
 
   const resultColor = scanResult?.success
     ? statusColors.delivered
@@ -623,7 +684,35 @@ export function DriverScanView() {
   // ---------------------------------------------------------------------------
 
   return (
-    <Screen>
+    <>
+      <View style={{ gap: space.xs }}>
+        <Text style={[type.label, { color: colors.onSurfaceVariant }]}>
+          Loading vehicle to:{' '}
+          {locationNames[trip.destination_id] ?? 'destination'}
+        </Text>
+
+        {trips.length > 1 && (
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              gap: space.xs,
+            }}
+          >
+            {trips.map((t) => (
+              <Chip
+                key={t.id}
+                selected={t.id === trip.id}
+                onPress={() => void loadTripData(t.id)}
+              >
+                {locationNames[t.origin_id] ?? '?'} →{' '}
+                {locationNames[t.destination_id] ?? '?'}
+              </Chip>
+            ))}
+          </View>
+        )}
+      </View>
+
       <View
         style={{
           height: size.scanner,
@@ -638,9 +727,7 @@ export function DriverScanView() {
           style={{ width: '100%', height: '100%' }}
           barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
           onBarcodeScanned={(result) => {
-            if (!scanResult?.success || !scanLock.current) {
-              void handleBarcodeScanned(result.data);
-            }
+            void handleBarcodeScanned(result.data);
           }}
         />
       </View>
@@ -698,7 +785,7 @@ export function DriverScanView() {
           <EmptyState
             icon="check-all"
             title="All packages loaded"
-            message="All scheduled packages have been scanned onto the vehicle."
+            message="All registered packages for this route have been scanned."
           />
         ) : (
           unscanned.map((pkg) => (
@@ -731,9 +818,17 @@ export function DriverScanView() {
         </Text>
       )}
 
+      <PrimaryButton
+        onPress={confirmDispatch}
+        loading={isDispatching}
+        disabled={isDispatching || loadedCount === 0}
+      >
+        Dispatch trip
+      </PrimaryButton>
+
       <PrimaryButton onPress={() => void loadTripData()}>
         Refresh Trip
       </PrimaryButton>
-    </Screen>
+    </>
   );
 }

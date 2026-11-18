@@ -32,7 +32,7 @@ export function SyncBar() {
         backgroundColor: colors.surface,
         borderBottomWidth: 1,
         borderColor: colors.outline,
-        marginTop:40,
+        marginTop:10,
       }}
     >
       <View

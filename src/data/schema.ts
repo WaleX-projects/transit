@@ -38,8 +38,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
 
 CREATE TABLE IF NOT EXISTS trips (
   id TEXT PRIMARY KEY,
-  vehicle_id TEXT NOT NULL,
-  driver_id TEXT NOT NULL,
+  vehicle_id TEXT  NULL,
+  driver_id TEXT NULL,
   origin_id TEXT NOT NULL,
   destination_id TEXT NOT NULL,
   status TEXT NOT NULL,

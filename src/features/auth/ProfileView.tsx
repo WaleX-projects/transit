@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 import { View } from 'react-native';
 import { Button, Text, useTheme } from 'react-native-paper';
 import { dismissSyncIssue, getSyncIssues, OutboxItem } from '../../data/outbox';
+import { runSyncCycle } from '../../data/sync';
 import { copy } from '../../lib/copy';
 import { useAuthStore } from '../../store/authStore';
 import { useSyncStore } from '../../store/syncStore';
@@ -16,6 +17,9 @@ export function ProfileView() {
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
   const refreshCounts = useSyncStore((s) => s.refreshCounts);
+  const userId = user?.id;
+  const role = user?.role;
+  const locationId = user?.location_id;
 
   const [issues, setIssues] = useState<OutboxItem[]>([]);
 
@@ -46,17 +50,21 @@ export function ProfileView() {
   const [refreshing, setRefreshing] = useState(false);
 
   const handleRefresh = async () => {
+    if (!userId || !role) return;
+
     setRefreshing(true);
 
     try {
       // Later, fetch updated data here.
-      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      await runSyncCycle({ userId, role, locationId: locationId ?? null });
+
     } finally {
       setRefreshing(false);
     }
   };
 
-  
+
   return (
     <Screen
       refreshing={refreshing}

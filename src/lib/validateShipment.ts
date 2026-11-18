@@ -12,7 +12,6 @@ export type ShipmentErrors = Partial<Record<keyof ShipmentForm | 'photos', strin
 
 // Nigerian mobile: 0803 123 4567, +234 803 123 4567 or 234803...
 const NG_PHONE = /^(?:\+234|234|0)[789][01]\d{8}$/;
-
 export function validateShipment(f: ShipmentForm, photos: string[]): ShipmentErrors {
   const e: ShipmentErrors = {};
   if (photos.length === 0) e.photos = 'Add at least one photo of the goods';
